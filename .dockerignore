@@ -1,0 +1,14 @@
+venv/
+data/
+reports/
+__pycache__/
+*.pyc
+.pytest_cache/
+.vscode/
+*.log
+output.txt
+tests/
+.git/
+.gitignore
+README.md
+run_pipeline.py

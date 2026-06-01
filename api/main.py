@@ -9,6 +9,55 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from collections import defaultdict
+import time
+
+# Global metrics store — updated by every request
+METRICS = {
+    "server_start_time"        : time.time(),
+    "total_requests"           : 0,
+    "total_validations"        : 0,
+    "total_single_validations" : 0,
+    "total_critical_issues"    : 0,
+    "total_warnings"           : 0,
+    "total_anomalies"          : 0,
+    "total_passed"             : 0,
+    "total_failed"             : 0,
+    "total_readings_processed" : 0,
+    "recent_validations"       : [],   # last 10 validation summaries
+}
+
+def record_validation(summary: dict, is_batch: bool = True) -> None:
+    # Update global metrics after every validation run.
+    METRICS["total_requests"]            += 1
+    METRICS["total_critical_issues"]     += summary.get("critical_count", 0)
+    METRICS["total_warnings"]            += summary.get("warning_count", 0)
+    METRICS["total_anomalies"]           += summary.get("total_anomalies", 0)
+    METRICS["total_readings_processed"]  += summary.get("total_rows", 1)
+
+    if is_batch:
+        METRICS["total_validations"] += 1
+    else:
+        METRICS["total_single_validations"] += 1
+
+    if summary.get("passed", False):
+        METRICS["total_passed"] += 1
+    else:
+        METRICS["total_failed"] += 1
+
+    # Keep last 10 validation records for recent activity feed
+    recent_entry = {
+        "timestamp"      : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "type"           : "batch" if is_batch else "single",
+        "rows"           : summary.get("total_rows", 1),
+        "critical"       : summary.get("critical_count", 0),
+        "warnings"       : summary.get("warning_count", 0),
+        "anomalies"      : summary.get("total_anomalies", 0),
+        "passed"         : summary.get("passed", False),
+    }
+    METRICS["recent_validations"].insert(0, recent_entry)
+    METRICS["recent_validations"] = METRICS["recent_validations"][:10]
+
 
 # ── [S5.1] Path setup ─────────────────────────────────────────────────────────
 BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -168,20 +217,7 @@ def health():
     summary        = "Validate a batch of vital sign readings"
 )
 def validate_batch(request: BatchValidateRequest):
-    """
-    Run the full validation pipeline on a batch of vital sign readings.
-
-    Pipeline steps:
-        1. Convert JSON readings to DataFrame
-        2. Run VitalSignsValidator (range, null, schema, BP consistency)
-        3. Run AnomalyDetector (outliers, spikes, stuck sensor, flatline)
-        4. Generate HTML report
-        5. Return summary + report download URL
-
-    Raises:
-        HTTPException 400: If DataFrame conversion fails
-        HTTPException 500: If pipeline fails unexpectedly
-    """
+    # Run the full validation pipeline on a batch of vital sign readings.
     try:
         # [S5.6-A] Convert readings to DataFrame
         records = [r.model_dump() for r in request.readings]
@@ -195,6 +231,9 @@ def validate_batch(request: BatchValidateRequest):
         report_path     = summary["report_path"]
         report_filename = os.path.basename(report_path)
         report_url      = f"/report/{report_filename}"
+
+        # [M2] Record metrics
+        record_validation(summary, is_batch=True)
 
         return ValidationSummaryResponse(
             status           = "PASS" if summary["passed"] else "FAIL",
@@ -227,15 +266,7 @@ def validate_batch(request: BatchValidateRequest):
     summary        = "Validate a single vital signs reading instantly"
 )
 def validate_single(reading: VitalReading):
-    """
-    Validate a single patient reading in real time.
-
-    Faster than /validate — no HTML report generated.
-    Useful for real-time monitoring where you need
-    instant feedback on one reading.
-
-    Returns list of issues and anomalies for that reading only.
-    """
+    # Validate a single patient reading in real time.
     try:
         # [S5.7-A] Single row DataFrame
         df = pd.DataFrame([reading.model_dump()])
@@ -276,6 +307,16 @@ def validate_single(reading: VitalReading):
             for a in a_results["anomalies"]
         ]
 
+        # [M3] Record metrics for single validation
+        single_summary = {
+            "total_rows"     : 1,
+            "critical_count" : v_results["critical_count"],
+            "warning_count"  : v_results["warning_count"],
+            "total_anomalies": a_results["total_anomalies"],
+            "passed"         : v_results["passed"],
+        }
+        record_validation(single_summary, is_batch=False)
+
         return SingleReadingResponse(
             patient_id    = reading.patient_id,
             passed        = v_results["passed"],
@@ -298,17 +339,72 @@ def validate_single(reading: VitalReading):
     "/report/{filename}",
     summary="Download a generated HTML validation report"
 )
+
+# ── [M4] Metrics Endpoint ─────────────────────────────────────────────────────
+
+@app.get("/metrics", summary="Live pipeline metrics")
+def get_metrics():
+    # Return live metrics for the validation pipeline.
+    uptime_seconds = time.time() - METRICS["server_start_time"]
+    uptime_minutes = uptime_seconds / 60
+    uptime_hours   = uptime_minutes / 60
+
+    total_val = (
+        METRICS["total_validations"] +
+        METRICS["total_single_validations"]
+    )
+    pass_rate = (
+        (METRICS["total_passed"] / total_val * 100)
+        if total_val > 0 else 0
+    )
+
+    return {
+        "service"                  : "ICU Vital Signs Validation API",
+        "version"                  : "1.0.0",
+        "uptime"                   : {
+            "seconds"              : round(uptime_seconds, 1),
+            "minutes"              : round(uptime_minutes, 2),
+            "hours"                : round(uptime_hours, 3),
+        },
+        "requests"                 : {
+            "total"                : METRICS["total_requests"],
+            "batch_validations"    : METRICS["total_validations"],
+            "single_validations"   : METRICS["total_single_validations"],
+        },
+        "validation_outcomes"      : {
+            "total_passed"         : METRICS["total_passed"],
+            "total_failed"         : METRICS["total_failed"],
+            "pass_rate_percent"    : round(pass_rate, 1),
+        },
+        "data_quality_stats"       : {
+            "total_readings"       : METRICS["total_readings_processed"],
+            "total_critical_issues": METRICS["total_critical_issues"],
+            "total_warnings"       : METRICS["total_warnings"],
+            "total_anomalies"      : METRICS["total_anomalies"],
+        },
+        "recent_validations"       : METRICS["recent_validations"],
+    }
+
+
+# ── [M5] Monitoring Dashboard Endpoint ───────────────────────────────────────
+
+@app.get("/dashboard", summary="Live monitoring dashboard")
+def monitoring_dashboard():
+    """  
+    Serve the live HTML monitoring dashboard.
+    Auto-refreshes every 10 seconds.
+    """
+    dashboard_path = os.path.join(BASE_DIR, "monitoring", "dashboard.html")
+    if not os.path.exists(dashboard_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Dashboard not found. Create monitoring/dashboard.html"
+        )
+    return FileResponse(dashboard_path, media_type="text/html")
+
+
 def download_report(filename: str):
-    """
-    Serve a previously generated HTML validation report.
-
-    Args:
-        filename: Report filename from /validate response
-
-    Raises:
-        HTTPException 404: If report file not found
-        HTTPException 400: If filename contains path traversal attempt
-    """
+    # Serve a previously generated HTML validation report.
     # [S5.8-A] Security: prevent path traversal attacks
     # e.g. filename = "../../etc/passwd"
     if ".." in filename or "/" in filename or "\\" in filename:
