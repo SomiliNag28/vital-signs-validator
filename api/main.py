@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 from collections import defaultdict
 import time
@@ -170,23 +170,10 @@ class HealthResponse(BaseModel):
 
 # ── [S5.4] Root Endpoint ──────────────────────────────────────────────────────
 
-@app.get("/", summary="Service info")
+@app.get("/", summary="Redirect to dashboard")
 def root():
-    """
-    Root endpoint — returns service information and available endpoints.
-    """
-    return {
-        "service"    : "ICU Vital Signs Validation API",
-        "version"    : "1.0.0",
-        "docs"       : "/docs",
-        "health"     : "/health",
-        "endpoints"  : {
-            "batch_validate" : "POST /validate",
-            "single_validate": "POST /validate/row",
-            "download_report": "GET  /report/{filename}",
-        },
-    }
-
+    # Redirect root URL to the live monitoring dashboard.
+    return RedirectResponse(url="/dashboard")
 
 # ── [S5.5] Health Endpoint ────────────────────────────────────────────────────
 
