@@ -326,6 +326,35 @@ def validate_single(reading: VitalReading):
     "/report/{filename}",
     summary="Download a generated HTML validation report"
 )
+def download_report(filename: str):
+    """
+    Serve a previously generated HTML validation report.
+    """
+    # [S5.8-A] Security: prevent path traversal
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    # [S5.8-B] Only allow .html files
+    if not filename.endswith(".html"):
+        raise HTTPException(status_code=400, detail="Invalid file type")
+
+    # [S5.8-C] Only allow files matching our naming pattern
+    if not filename.startswith("validation_report_"):
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    report_path = os.path.join(REPORTS_DIR, filename)
+
+    if not os.path.exists(report_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Report '{filename}' not found."
+        )
+
+    return FileResponse(
+        path       = report_path,
+        media_type = "text/html",
+        filename   = filename,
+    )
 
 # ── [M4] Metrics Endpoint ─────────────────────────────────────────────────────
 
